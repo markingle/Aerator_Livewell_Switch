@@ -306,7 +306,7 @@
 		  <span class="slider"></span>
 	</label>-->
 	<div class="onoffswitch">
-    <input type="checkbox" name="onoffswitch" class="onoffswitch-checkbox" id="onoff_switch_id" onclick="sendSwitchState()"">
+    <input type="checkbox" name="onoffswitch" class="onoffswitch-checkbox" id="onoff_switch_id" onclick="sendSwitchState()">
     <label class="onoffswitch-label" for="onoff_switch_id">
         <span class="onoffswitch-inner"></span>
         <span class="onoffswitch-switch"></span>
@@ -337,6 +337,8 @@
    <output name="show_parN_val" id="parN">0</output></h2>
     </p>
 	</div>
+	TIMER:
+  	<input type="text" name="countdown" id="countdown_id" value="0">
 	</div>
 	
 	
@@ -349,7 +351,7 @@
 	A0 = 0;
    	document.addEventListener("DOMContentLoaded", function(event) {
 		console.log("DOM fully loaded and parsed");
-       	g1 = new JustGage({
+       	/*g1 = new JustGage({
            	id: "g1",
            	decimals: true,
     	    value: A0,
@@ -365,7 +367,7 @@
 			customSectors : [{"lo":0,"hi":4,"color":"#ff0000"},
 				{"lo":5,"hi":8,"color":"#ffff00"},
 				{"lo":9,"hi":12,"color":"#00cc00"}]
-			});
+			});*/
     	});
 
 	window.addEventListener("load", addListeners); 
@@ -428,16 +430,19 @@
 	function addListeners()
 	{
 		
+		// ***  Need to address this error before you can use buttons in this code.....
+		//---> [Violation] Added non-passive event listener to a scroll-blocking 'touchstart' event. Consider marking event handler as 'passive' to make the page more responsive. See https://www.chromestatus.com/feature/5745543795965952 <---
+
 		//document.getElementById('C').addEventListener("touchstart", touchStartC);
 		//document.getElementById('C').addEventListener("touchend", touchEndC);
-		document.getElementById('I').addEventListener("touchstart", touchStartI);
-		document.getElementById('I').addEventListener("touchend", touchEndI);
+		//document.getElementById('I').addEventListener("touchstart", touchStartI);
+		//document.getElementById('I').addEventListener("touchend", touchEndI);
 
-		document.getElementById('M').addEventListener("touchstart", touchStartM);
-		document.getElementById('M').addEventListener("touchend", touchEndM);
+		//document.getElementById('M').addEventListener("touchstart", touchStartM);
+		//document.getElementById('M').addEventListener("touchend", touchEndM);
 
-		document.getElementById('L').addEventListener("touchstart", touchStartL);
-		document.getElementById('L').addEventListener("touchend", touchEndL);
+		//document.getElementById('L').addEventListener("touchstart", touchStartL);
+		//document.getElementById('L').addEventListener("touchend", touchEndL);
 
 			//document.getElementById('T').addEventListener("touchstart", touchStart1);
 			//document.getElementById('T').addEventListener("touchend", touchEnd1);
@@ -488,9 +493,51 @@
 	connection.onerror = function (error) { console.log('WebSocket Error ', error); };
 	connection.onmessage = function (ev)
 		{ 
-			var A0 = (ev.data);
-			g1.refresh(A0, null);
-			console.log('voltage: ', ev.data);
+
+			var json_msg = JSON.parse(ev.data);
+			var msg_type = json_msg.message_type;
+			console.log('Message Type: ', msg_type);
+
+			switch (msg_type)
+			{
+				case "startup":
+					var timer_state = json_msg.startup_state;
+					var ontime = json_msg.ontime;
+					var offtime = json_msg.offtime;
+					console.log('Timer State: ', timer_state);
+					console.log('Setting ON Time: ', ontime);
+					if(timer_state == 1)
+						{
+							document.getElementById("onoff_switch_id").checked = true;
+							console.log('Setting checkbox to true');
+						}
+
+					if(timer_state == 0)
+						{
+							document.getElementById("onoff_switch_id").checked = false;
+							console.log('Setting checkbox to false');
+						}
+			
+					if(ontime > 0)
+						{
+							document.getElementById("ontime_id").value = ontime;
+							document.getElementById('parM').innerText = ontime;
+							console.log('Setting ON Time: ', ontime);
+						}
+
+					if(offtime > 0)
+						{
+							document.getElementById("offtime_id").value = offtime;
+							document.getElementById('parN').innerText = offtime;
+							console.log('Setting OFF Time: ', offtime);
+						}
+				case "clock_update":
+					console.log("Clock Update");
+					console.log('Time Count :', json_msg.value);
+					var timer_count = json_msg.value;
+					document.getElementById("countdown_id").value = timer_count;
+			}
+			
 	 	};
 
     </script>

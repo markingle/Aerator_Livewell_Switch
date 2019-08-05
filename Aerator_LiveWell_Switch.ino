@@ -1,9 +1,11 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
-#include <WebServer.h>
+#include <WebServer.h>                                                                  
 #include <ESPmDNS.h>
 #include <SPIFFS.h>
 #include <WebSocketsServer.h>
+#include <ArduinoJson.h>
+#include <EEPROM.h>
 
 //Create a web server
 WebServer server ( 80 );
@@ -13,7 +15,7 @@ WebSocketsServer webSocket(81);
 
 
 unsigned int state;
-
+  
 #define SEQUENCE_IDLE 0x00
 #define GET_SAMPLE 0x10
 
@@ -24,29 +26,41 @@ const char WiFiAPPSK[] = "Livewell";
 #define USE_SERIAL Serial
 #define DBG_OUTPUT_PORT Serial
 
+byte promValues[] = {0,0,0};
+
 uint8_t remote_ip;
 uint8_t socketNumber;
+uint8_t send_num;
 float value;
 int ontime;   //On time setting from mobile web app
 int offtime;  //Off time setting from mobile web app
 
 //These will need to be updated to the GPIO pins for each control circuit.
-int POWER = 13; 
-int MOMENTARY = 4;
+int POWER = 13;
+int TIMER_SWITCH = 2; 
+int WIFI_CONNECTION = 15;
+int WIFI_CLIENT_CONNECTED = 16;
+int Timer_LED = 17;
 int SPEED = 14; 
 int LEFT = 12; 
 int RIGHT = 13;
 const int ANALOG_PIN = A0;
 
-int onoff = 0; 
+int onoff = 1; 
 
-volatile byte switch_state = LOW;
+volatile byte switch_state = HIGH;
 boolean pumpOn = false;
 boolean timer_state = false;
 boolean timer_started = false;
+boolean wifi_state = false;
+boolean wifi_client_conn = false;
+int startup_state;
+int ontime_value;  //number of ON minutes store in EEPROM
+int offtime_value; //number of OFF minutes store in EEPROM
 
 int Clock_seconds;
 
+ 
 //Keep this code for reference to determine how to get voltage for pump
 //extern "C" {
 //uint16 readvdd33(void);
@@ -58,11 +72,11 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t lenght
     String text = String((char *) &payload[0]);
     char * textC = (char *) &payload[0];
     String voltage;
-    String temp;
+    String temp1, temp2, temp3, temp4;
     float percentage;
     float actual_voltage;  //voltage calculated based on percentage drop from 5.0 circuit.
     int nr;
-    int on;
+    //int onof;
     uint32_t rmask;
     int i;
     
@@ -71,14 +85,31 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t lenght
             //Reset the control for sending samples of ADC to idle to allow for web server to respond.
             USE_SERIAL.printf("[%u] Disconnected!\n", num);
             state = SEQUENCE_IDLE;
+            digitalWrite(WIFI_CLIENT_CONNECTED, LOW);
             break;
         case WStype_CONNECTED:
           {
             //Display client IP info that is connected in Serial monitor and set control to enable samples to be sent every two seconds (see analogsample() function)
             IPAddress ip = webSocket.remoteIP(num);
             USE_SERIAL.printf("[%u] Connected from %d.%d.%d.%d url: %s\n", num, ip[0], ip[1], ip[2], ip[3], payload);
+            digitalWrite(WIFI_CLIENT_CONNECTED, HIGH);
             socketNumber = num;
             state = GET_SAMPLE;
+
+            StaticJsonDocument<200> doc;
+         
+            doc["message_type"] = "startup";
+            doc["startup_state"] = String(startup_state);
+            doc["ontime"] = String(ontime);
+            doc["offtime"] = String(offtime);
+            
+            String databuf;
+            serializeJson(doc, databuf);
+            //serializeJsonPretty(doc, Serial);
+            
+            webSocket.sendTXT(num, databuf);
+            //webSocket.sendTXT(num, temp4);
+            wifi_client_conn = true;
           }
             break;
  
@@ -91,6 +122,11 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t lenght
                 //uint32_t ontime = (uint32_t) strtol((const char *) &payload[1], NULL, 2);
                 Serial.print("On Time = ");
                 Serial.println(ontime);
+                EEPROM.write(1,ontime);
+                EEPROM.commit();
+                delay(500);
+                byte value = EEPROM.read(1);
+                Serial.println("On Time Stored in EEPROM " + String(value));
                 }
             if (payload[0] == '-')
                 {
@@ -100,16 +136,40 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t lenght
                 //uint32_t offtime = (uint32_t) strtol((const char *) &payload[1], NULL, 2);
                 Serial.printf("Off Time = ");
                 Serial.println(offtime);
+                EEPROM.write(2,offtime);
+                EEPROM.commit();
+                delay(500);
+                byte value = EEPROM.read(2);
+                Serial.println("Off Time stored in EEPROM " + String(value));
                 }
             if (payload[0] == 'O')
                 {
                 Serial.printf("[%u] Timer state event %s\n", num, payload);
                 //Serial.println((char *)&payload);
-                if (payload[1] == 'N') timer_state = true;
-                if (payload[2] == 'F') timer_state = false;
+                if (payload[1] == 'N')
+                  {
+                    startup_state = 1;
+                    EEPROM.write(0,startup_state);
+                    EEPROM.commit();
+                    byte value = EEPROM.read(0);
+                    Serial.println("Timer turned ON " + String(value));
+                    timer_state = true;
+                    pumpOn = true;
+                  }
+                if (payload[2] == 'F')
+                  {
+                    startup_state = 0;
+                    EEPROM.write(0,startup_state);
+                    EEPROM.commit();
+                    byte value = EEPROM.read(0);
+                    Serial.println("Timer turned OFF " + String(value));
+                    timer_state = false;
+                    pumpOn = false;
+                  }
                 }
-                
-            if (payload[0] == '#')
+
+            //Hang on to this code until you are done!!!!
+            /*if (payload[0] == '#')  
                 Serial.printf("[%u] Digital GPIO Control Msg: %s\n", num, payload);
                 if (payload[1] == 'I')
                 {
@@ -117,22 +177,22 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t lenght
                     {
                     Serial.printf("Direction Down");
                     //value=readvdd33();
-                Serial.print("Vcc:");
-                Serial.println(value/1000);
-                percentage = (value/1000)/3.0;
-                Serial.print("percentage:");
-                Serial.println(percentage);
-                actual_voltage = 11.8*percentage; //Using 11.8 to conservative
-                Serial.print("act_volt:");
-                Serial.println(percentage);
-                voltage = String(actual_voltage);
-                webSocket.sendTXT(num, voltage);
-                    digitalWrite(POWER, HIGH);
+                    Serial.print("Vcc:");
+                    Serial.println(value/1000);
+                    percentage = (value/1000)/3.0;
+                    Serial.print("percentage:");
+                    Serial.println(percentage);
+                    actual_voltage = 11.8*percentage; //Using 11.8 to conservative
+                    Serial.print("act_volt:");
+                    Serial.println(percentage);
+                    voltage = String(actual_voltage);
+                    webSocket.sendTXT(num, voltage);
+                    //digitalWrite(POWER, HIGH);
                     }
                   if (payload[2] == 'U')
                     {
                     Serial.printf("Direction Up");
-                    digitalWrite(POWER, LOW);
+                    //digitalWrite(POWER, LOW);
                     }
                   break;
                 }
@@ -141,12 +201,12 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t lenght
                   if (payload[2] == 'D')
                     {
                     Serial.printf("Direction Down");
-                    digitalWrite(MOMENTARY, HIGH);
+                    //digitalWrite(MOMENTARY, HIGH);
                     }
                   if (payload[2] == 'U')
                     {
                     Serial.printf("Direction Up");
-                    digitalWrite(MOMENTARY, LOW);
+                    //digitalWrite(MOMENTARY, LOW);
                     }
                   break;
                 }
@@ -181,7 +241,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t lenght
             if (payload[0] == 'S')
               {
                 Serial.printf("[%u] Analog GPIO Control Msg: %s\n", num, payload);
-              }
+              }*/
               
          case WStype_BIN:
          {
@@ -232,7 +292,7 @@ bool handleFileRead(String path){
       path += "relay.html";
       state = SEQUENCE_IDLE;
       File file = SPIFFS.open(path, "r");
-      Serial.print("Sending relay ");
+      Serial.print("Sending relay.html ");
       Serial.print(path);
       String contentType = getContentType(path);
       size_t sent = server.streamFile(file, contentType);
@@ -266,6 +326,8 @@ void setupWiFi()
     AP_NameChar[i] = AP_NameString.charAt(i);
 
   WiFi.softAP(AP_NameChar);
+  wifi_state = true;
+  digitalWrite(WIFI_CONNECTION, HIGH);
 }
 
 void IRAM_ATTR onoffTimer(){
@@ -273,27 +335,37 @@ void IRAM_ATTR onoffTimer(){
   switch (onoff) {
 
     case 0:
-      Serial.println("Turning Off Pump " + String(Clock_seconds));
-      digitalWrite(POWER,LOW);
-      pumpOn = false;
+      if (pumpOn == false) 
+      {
+        digitalWrite(TIMER_SWITCH,LOW);  //We only need to set TIMER_SWITCH once....set pumpOn to TRUE in prep for end of OFFTIME.
+        pumpOn = true;
+        Serial.println("Turning OFF pump");
+        digitalWrite(Timer_LED, LOW);
+      }
+      Serial.println("Pump has been OFF for " + String(Clock_seconds) + " seconds");
       Clock_seconds++;
-      if (Clock_seconds > offtime){
+      if (Clock_seconds > (offtime*60)){
         onoff = 1;
-        Clock_seconds = 0;
+        Clock_seconds = 1;
       }
       break;
     
     case 1:
-      Serial.println("Turning On Pump " + String(Clock_seconds));
-      digitalWrite(POWER,HIGH);
-      pumpOn = true;
+      if (pumpOn == true)
+      {
+        digitalWrite(TIMER_SWITCH,HIGH);  //We only need to set TIMER_SWITCH once....set pumpOn to FALSE in prep for end of OFFTIME.
+        pumpOn = false;
+        Serial.println("Turning ON pump");
+        digitalWrite(Timer_LED, HIGH);
+      }
+      Serial.println("Pump is running for " + String(Clock_seconds) + " seconds");
       Clock_seconds++;
-      if (Clock_seconds > ontime) {
+      if (Clock_seconds > (ontime*60)) {
         onoff = 0;
-        Clock_seconds = 0;
+        Clock_seconds = 1;
       }
       break;
-    }  
+    }
 }
 
 void startTimer(){
@@ -314,22 +386,26 @@ void stopTimer(){
     timer = NULL;
     timer_started = false;
     Serial.println("Timer Stopped");
-    digitalWrite(POWER,LOW);
+    digitalWrite(TIMER_SWITCH,LOW);
+    digitalWrite(Timer_LED,LOW);
   }
 }
 
 void setup() {
   pinMode(POWER, OUTPUT);
-  pinMode(MOMENTARY, OUTPUT);
+  //pinMode(TIMER_SWITCH, OUTPUT);
+  pinMode(WIFI_CONNECTION, OUTPUT);
+  pinMode(WIFI_CLIENT_CONNECTED, OUTPUT);
+  pinMode(Timer_LED, OUTPUT);
   pinMode(SPEED, OUTPUT);
-  pinMode(LEFT, OUTPUT);
-  pinMode(RIGHT, OUTPUT);
-
+  
   digitalWrite(POWER, LOW);
-  digitalWrite(MOMENTARY, LOW);
-  digitalWrite(SPEED, LOW);
-  digitalWrite(LEFT, LOW);
-  digitalWrite(RIGHT, LOW);
+  //digitalWrite(TIMER_SWITCH, LOW);
+  digitalWrite(WIFI_CONNECTION, LOW);
+  digitalWrite(WIFI_CLIENT_CONNECTED, LOW);
+  digitalWrite(Timer_LED, LOW);
+  digitalWrite(SPEED, HIGH);
+  
   
   Serial.begin(115200);
   SPIFFS.begin();
@@ -341,6 +417,44 @@ void setup() {
   Serial.print("AP IP address: ");
   Serial.println(myIP);
 
+  EEPROM.begin(3); //Index of three for - On/Off state 1 or 0, OnTime value, OffTime value
+
+
+  //Determine state of timer before it was powered off
+  //startup_state = EEPROM.read(0);
+  //if (startup_state == 0) 
+ 
+    Serial.println("Start up state of pump is OFF");
+    timer_state = false;
+    pumpOn = false;
+    pinMode(TIMER_SWITCH, OUTPUT);
+    digitalWrite(TIMER_SWITCH, LOW);
+    digitalWrite(Timer_LED, LOW);
+  //}
+  //else
+  //{
+  //  Serial.println("State of pump is ON...turning it off");
+  //  timer_state = true;
+  //  pumpOn = true;
+  //  pinMode(TIMER_SWITCH, OUTPUT);
+  //  digitalWrite(TIMER_SWITCH, LOW);
+  //}
+
+  //Determine the value set for ON Time in EEPROM
+  ontime_value = EEPROM.read(1);
+  if (ontime_value > 0) 
+  {
+    ontime = ontime_value;
+    Serial.println("On Time setting is " + String(ontime));
+  }
+    
+  //Determine the value set for OFF Time inEEPROM
+  offtime_value = EEPROM.read(2);
+  if (offtime_value > 0) 
+  {
+    offtime = offtime_value;
+    Serial.println("OFF Time setting is " + String(offtime));
+  }
 
   server.on("/", HTTP_GET, [](){
     handleFileRead("/");
@@ -365,20 +479,49 @@ void setup() {
 //    Serial.println("Error setting up MDNS responder!");
 //    while(1) { 
 //      delay(1000);
-//    }
+//    }0;9
 //  }
 //  Serial.println("mDNS responder started");
 
   // Add service to MDNS
   //  MDNS.addService("http", "tcp", 80);
   //  MDNS.addService("ws", "tcp", 81);
+
 }
 
 void loop() {
+
+  /*StaticJsonDocument<200> doc;
+  
+  doc["sensor"] = "gps";
+  doc["time"] = 1351824120;
+  
+  JsonArray data = doc.createNestedArray("data");
+
+  data.add(48.756080);  // 6 is the number of decimals to print
+  data.add(2.302038);   // if not specified, 2 digits are printed
+  String databuf;
+  serializeJson(doc, databuf);
+  //serializeJsonPretty(doc, Serial);
+  
+  webSocket.sendTXT(0, databuf);
+
+  delay(10);*/
+
   webSocket.loop();
   server.handleClient();
   if ((timer_state == true) && (timer_started == false)) startTimer();
   if ((timer_state == false) && (timer_started == true)) stopTimer();
-  // Add logic to enable timer with NO/OFF switch in web app
+
+  StaticJsonDocument<200> clock_time;
+  clock_time["message_type"] = "clock_update";
+  clock_time["value"] = Clock_seconds;
+  JsonObject time_data = clock_time.createNestedObject();
   
+  
+  String databuf;
+  serializeJson(clock_time, databuf);
+ 
+ 
+  webSocket.sendTXT(0, databuf);
 }
